@@ -1,0 +1,15 @@
+openssl rand 256 > C:\Users\kusumam\Desktop\demo\Encryption\dek.txt
+
+openssl enc -in C:\Users\kusumam\Desktop\demo\Encryption\SAP.zip -out C:\Users\kusumam\Desktop\demo\Encryption\SAP.zip.enc -aes-256-cbc -pass file:C:\Users\kusumam\Desktop\demo\Encryption\dek.txt
+
+gcloud alpha kms keys versions get-public-key 1 --location australia-southeast1 --keyring schaf-keyring --key my-asymm-encr-key --output-file kek.pub
+
+openssl pkeyutl -in C:\Users\kusumam\Desktop\demo\Encryption\dek.txt -encrypt -pubin -inkey C:\Users\kusumam\Desktop\demo\Encryption\kek.pub -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256 > C:\Users\kusumam\Desktop\demo\Encryption\dek.enc
+
+
+gcloud alpha kms asymmetric-decrypt --location australia-southeast1 --keyring schaf-keyring --key my-asymm-encr-key --version 1 --ciphertext-file ./dek.enc --plaintext-file dek.txt
+
+openssl enc -d -in rfc.enc -out rfc.txt -aes-256-cbc -pass file:./dek.txt
+
+---------------
+openssl rand -base64 256 > C:\Users\kusumam\Desktop\demo\Encryption\dek.txt
