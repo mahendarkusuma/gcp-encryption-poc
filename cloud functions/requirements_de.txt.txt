@@ -1,0 +1,15 @@
+cryptography==2.4.1
+google-api-python-client==1.7.4
+pyOpenSSL==18.0.0
+google-cloud-storage==1.13.0
+gcs-client==0.2.2
+google-auth==1.5.1
+requests==2.19.1
+six==1.11.0
+tzlocal
+requests_toolbelt
+GoogleAppEngineCloudStorageClient==1.9.22.1
+google-auth-httplib2==0.0.2
+google-cloud-core==0.27.1
+google-resumable-media==0.3.0
+googleapis-common-protos==1.5.3

@@ -1,0 +1,141 @@
+import json
+import os
+from datetime import datetime
+import google.auth
+import google.auth.app_engine
+import google.auth.compute_engine.credentials
+import google.auth.iam
+import google.oauth2.credentials
+import google.oauth2.service_account
+import requests
+import requests_toolbelt.adapters.appengine
+from google.auth.transport.requests import Request
+from tzlocal import get_localzone
+from google.cloud import storage
+from google.cloud import datastore
+
+
+def trigger_decryption_dag(event, context):
+    _LOCAL_TZ = get_localzone()
+    file = event
+    ds_client = datastore.Client(project=os.environ.get('PROJECT'), namespace=os.environ.get('DATASTORE_NAMESPACE'))
+    if file['name'].startswith('SAP_PB1_IC_G381_FML', 0, 19):
+        dataset_identifier = file['name'][8:15]
+    elif file['name'].startswith('SAP_PB1_FF_O6522', 0, 16):
+        dataset_identifier = file['name'][8:16]
+    else:
+        dataset_identifier = file['name'][8:15]
+    key = ds_client.key(os.environ.get('DATASTORE_KEYNAME'), dataset_identifier)
+    datastore_result = ds_client.get(key)
+    if (file['name'] != 'iv') and (os.path.splitext(file['name'])[1] == '.enc') and (
+            os.path.splitext(file['name'].split(".", 1)[1])[0] == 'zip'):
+        bucket = os.environ.get('SOURCE_BUCKET')
+
+        ivFilePath = os.environ.get('IV_FILENAME')
+        iv_file_exists_flag = is_iv_file_exist(bucket, ivFilePath)
+        if iv_file_exists_flag is False:
+            print("iv file is missing")
+        else:
+            dataKeyFilePath = os.path.splitext(file['name'].split(".", 1)[0])[0] + '.dek.enc'
+            datakey_file_exists_flag = is_datakey_file_exist(bucket, dataKeyFilePath)
+            if datakey_file_exists_flag is False:
+                print("{} data key file is missing".format(dataKeyFilePath))
+            else:
+                config_dict = {}
+                for key, val in datastore_result.items():
+                    config_dict[key] = val
+                config_dict['filename']=file['name']
+                conf = config_dict
+                payload = {
+                    'run_id': 'post-triggered-run-%s' % datetime.now(_LOCAL_TZ).strftime('%Y%m%d%H%M%s%Z'),
+                    'conf': json.dumps(conf),
+                }
+                cloudcomposer_api_endpoint = os.environ.get('CLOUDCOMPOSER_API')+'ap_batch_cc_decryption_dag'+'/dag_runs'
+                make_iap_request(
+                    cloudcomposer_api_endpoint,
+                    os.environ.get('CLOUDCOMPOSER_CLIENT_ID'), method='POST',
+                    data=json.dumps(payload))
+    else:
+        print("{} is not a valid file to proceed further".format(file['name']))
+
+
+def is_datakey_file_exist(bucket_name, object):
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.get_blob(object)
+    try:
+        return blob.exists(client)
+    except:
+        return False
+
+
+def is_iv_file_exist(bucket_name, object):
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.get_blob(object)
+    try:
+        return blob.exists(client)
+    except:
+        return False
+
+
+def make_iap_request(url, client_id, method='GET', **kwargs):
+    IAM_SCOPE = os.environ.get('IAM_SCOPE')
+    OAUTH_TOKEN_URI = os.environ.get('OAUTH_TOKEN_URI')
+    bootstrap_credentials, _ = google.auth.default(
+        scopes=[IAM_SCOPE])
+    if isinstance(bootstrap_credentials,
+                  google.oauth2.credentials.Credentials):
+        raise Exception('make_iap_request is only supported for service '
+                        'accounts.')
+    elif isinstance(bootstrap_credentials,
+                    google.auth.app_engine.Credentials):
+        requests_toolbelt.adapters.appengine.monkeypatch()
+
+    bootstrap_credentials.refresh(Request())
+
+    signer_email = bootstrap_credentials.service_account_email
+    if isinstance(bootstrap_credentials,
+                  google.auth.compute_engine.credentials.Credentials):
+        signer = google.auth.iam.Signer(
+            Request(), bootstrap_credentials, signer_email)
+    else:
+        signer = bootstrap_credentials.signer
+
+    service_account_credentials = google.oauth2.service_account.Credentials(
+        signer, signer_email, token_uri=OAUTH_TOKEN_URI, additional_claims={
+            'target_audience': client_id
+        })
+
+    google_open_id_connect_token = get_google_open_id_connect_token(
+        service_account_credentials)
+
+    resp = requests.request(
+        method, url,
+        headers={'Authorization': 'Bearer {}'.format(
+            google_open_id_connect_token)}, **kwargs)
+    if resp.status_code == 403:
+        raise Exception('Service account {} does not have permission to '
+                        'access the IAP-protected application.'.format(
+            signer_email))
+    elif resp.status_code != 200:
+        raise Exception(
+            'Bad response from application: {!r} / {!r} / {!r}'.format(
+                resp.status_code, resp.headers, resp.text))
+    else:
+        return resp.text
+
+
+def get_google_open_id_connect_token(service_account_credentials):
+    IAM_SCOPE = os.environ.get('IAM_SCOPE')
+    OAUTH_TOKEN_URI = os.environ.get('OAUTH_TOKEN_URI')
+    service_account_jwt = (
+        service_account_credentials._make_authorization_grant_assertion())
+    request = google.auth.transport.requests.Request()
+    body = {
+        'assertion': service_account_jwt,
+        'grant_type': google.oauth2._client._JWT_GRANT_TYPE,
+    }
+    token_response = google.oauth2._client._token_endpoint_request(
+        request, OAUTH_TOKEN_URI, body)
+    return token_response['id_token']

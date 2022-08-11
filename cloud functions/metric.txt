@@ -1,0 +1,15 @@
+resource.type="cloud_composer_environment"
+resource.labels.location="us-central1"
+resource.labels.environment_name="ent-common-cloudcomposer-v3"
+
+labels.workflow="ap_batch_cc_dag.fourth_subdag"
+labels.task-id="load_datafile_to_bq"
+("WARNING - Loaded records do not match metadata.")
+
+
+resource.type="gcs_bucket"
+logName = ("projects/ent-common/logs/cloudaudit.googleapis.com%2Factivity"
+    OR "projects/ent-common/logs/cloudaudit.googleapis.com%2Fsystem_events"
+    OR "projects/ent-common/logs/cloudaudit.googleapis.com%2Fdata_access"
+    )
+protoPayload.methodName!="storage.objects.list"

@@ -1,0 +1,142 @@
+from __future__ import print_function, unicode_literals
+
+import base64
+from binascii import unhexlify
+import os
+import gcs_client
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher
+from cryptography.hazmat.primitives.ciphers import algorithms
+from cryptography.hazmat.primitives.ciphers import modes
+from google.cloud import storage
+from googleapiclient import discovery
+from google.auth import app_engine
+import json
+from datetime import datetime
+import google.auth
+import google.auth.app_engine
+import google.auth.compute_engine.credentials
+import google.auth.iam
+import google.oauth2.credentials
+import google.oauth2.service_account
+import requests
+import requests_toolbelt.adapters.appengine
+from google.auth.transport.requests import Request
+
+
+def decrypt_source_file(event, context):
+    file = event
+    if (file['name'] != 'iv') and (os.path.splitext(file['name'])[1] == '.enc') and (
+            os.path.splitext(file['name'].split(".", 1)[1])[0] == 'zip'):
+        filename = os.environ.get('IV_FILENAME')
+        bucket = os.environ.get('SOURCE_BUCKET')
+
+        ivFilePath = os.environ.get('IV_FILENAME')
+        iv_file_exists_flag = is_iv_file_exist(bucket, ivFilePath)
+        if iv_file_exists_flag is False:
+            print("iv file is missing")
+        else:
+            dataKeyFilePath = os.path.splitext(file['name'].split(".", 1)[0])[0] + '.dek.enc'
+            datakey_file_exists_flag = is_datakey_file_exist(bucket, dataKeyFilePath)
+            if datakey_file_exists_flag is False:
+                print("{} data key file is missing".format(dataKeyFilePath))
+            else:
+                ciphertext_gcp_data_name, ciphertext_gcp_key_name = get_cloud_storage_objects(bucket, dataKeyFilePath,
+                                                                                              file['name'])
+                # credentials = gcs_client.Credentials(os.environ.get('KEY_JSON'))
+                credentials = google.auth.app_engine.Credentials
+                
+                print("{} credentials".format(credentials))
+                objects = gcs_client.Object(bucket, filename, credentials=credentials)
+                with objects.open() as obj:
+                    iv = obj.read()
+                    print('Contents of file %s are:\n' % obj.name, iv)
+                backend1 = default_backend()
+                decrypted_key = decrypt_data_key_file(ciphertext_gcp_key_name)
+                decrypted_key = unhexlify(decrypted_key)
+                decrypted_data = decrypt_input_data_file(backend1, decrypted_key, iv, ciphertext_gcp_data_name)
+                decrypted_data_file_path = os.path.splitext(file['name'].split(".", 1)[0])[0] + '.zip'
+                upload_object_to_gcs(os.environ.get('DESTINATION_BUCKET'), decrypted_data, decrypted_data_file_path)
+    else:
+        print("{} is not a valid file to proceed further".format(file['name']))
+
+
+def is_datakey_file_exist(bucket_name, object):
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.get_blob(object)
+    try:
+        return blob.exists(client)
+    except:
+        return False
+
+
+def is_iv_file_exist(bucket_name, object):
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.get_blob(object)
+    try:
+        return blob.exists(client)
+    except:
+        return False
+
+
+def decrypt_data_key_file(ciphertext_gcp_key_name):
+    client = discovery.build('cloudkms', 'v1')
+    project_id = os.environ.get('PROJECT')
+    location_id = os.environ.get('LOCATION_ID')
+    key_ring_id = os.environ.get('KEY_RING_ID')
+    crypto_key_id = os.environ.get('CRYPTO_KEY_ID')
+    crypto_key_versions = os.environ.get('CRYPTO_KEY_VERSIONS')
+    key_path = 'projects/{}/locations/{}/keyRings/{}/cryptoKeys/{}/cryptoKeyVersions/{}'.format(
+        project_id, location_id, key_ring_id, crypto_key_id, crypto_key_versions)
+    plaintext_bytes = decryptRSA(ciphertext_gcp_key_name,
+                                 client,
+                                 key_path)
+
+    return plaintext_bytes
+
+
+def decrypt_input_data_file(backend, decrypted_key, iv, ciphertext_gcp_data_name):
+    alg = algorithms.AES(decrypted_key)
+    mode = modes.CBC(iv)
+    cipher = Cipher(alg, mode, backend=backend)
+    decryptor = cipher.decryptor()
+    ptext = decryptor.update(ciphertext_gcp_data_name) + decryptor.finalize()
+
+    unpadder = padding.PKCS7(256).unpadder()
+    ptext = unpadder.update(ptext) + unpadder.finalize()
+    return ptext
+
+
+def get_cloud_storage_objects(bucket, decrypted_key_file, decrypted_file):
+    credentials = gcs_client.Credentials(os.environ.get('KEY_JSON'))
+    objects = gcs_client.Object(bucket, decrypted_key_file, credentials=credentials)
+    with objects.open() as obj:
+        ciphertext_gcp_key_name = obj.read()
+    objects = gcs_client.Object(bucket, decrypted_file, credentials=credentials)
+    with objects.open() as obj:
+        ciphertext_gcp_data_name = obj.read()
+    return ciphertext_gcp_data_name, ciphertext_gcp_key_name
+
+
+def decryptRSA(ciphertext, client, key_path):
+    request_body = {'ciphertext': base64.b64encode(ciphertext).decode('utf-8')}
+    request = client.projects() \
+        .locations() \
+        .keyRings() \
+        .cryptoKeys() \
+        .cryptoKeyVersions() \
+        .asymmetricDecrypt(name=key_path,
+                           body=request_body)
+    response = request.execute()
+    plaintext = base64.b64decode(response['plaintext'])
+    return plaintext
+
+
+def upload_object_to_gcs(bucket_name, decrypted_data, destination_blob_name):
+    storage_client = storage.Client()
+    bucket = storage_client.get_bucket(bucket_name)
+    blob = bucket.blob(destination_blob_name)
+    blob.upload_from_string(decrypted_data)
